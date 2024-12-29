@@ -2,187 +2,150 @@ import os
 import shutil
 from aiogram import Bot, Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, InputFile
+from aiogram.types import Message, InputFile, FSInputFile
 from aiogram.fsm.context import FSMContext
 import asyncio
 from aiogram import Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import ContentType, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 from pathlib import Path
 from PIL import Image
 from PyPDF2 import PdfMerger
-from typing import List, Tuple
+from typing import List
+import aiofiles
+from uuid import uuid4
 
 # Загрузка токена из .env
-env_path = Path("venv") / ".env"
-load_dotenv(dotenv_path='.env')
+load_dotenv(dotenv_path=".env")
 
-TG_TOKEN = os.getenv('TG_TOKEN')
+TG_TOKEN = os.getenv("TG_TOKEN")
 
 bot = Bot(token=TG_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
-# Папка для хранения файлов
+# Папки
 BASE_PATH = "user_files"
 RESULTS_PATH = "results"
 
+os.makedirs(BASE_PATH, exist_ok=True)
+os.makedirs(RESULTS_PATH, exist_ok=True)
 
-# Команда /start
+kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="Объединить файлы"),
+        ]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+    selective=True,
+)
+
 @router.message(Command(commands=["start"]))
-async def send_welcome(message: types.Message):
+async def send_welcome(message: Message):
     await message.answer(
-        "Привет! Я бот для обработки файлов. Отправьте файл для обработки."
+        "Привет! Я бот для обработки файлов. Отправьте файл для обработки.", reply_markup=kb
     )
 
-
-# Команда /help
 @router.message(Command(commands=["help"]))
-async def send_help(message: types.Message):
+async def send_help(message: Message):
     await message.answer(
         "Я могу принимать и обрабатывать файлы. Просто отправьте файл или фото, и я обработаю их для вас."
     )
 
-
-# Обработка всех типов файлов (фото, документы)
-@router.message(F.document | F.photo | F.video)
-async def new_func(message: types.Message):
+@router.message(F.content_type == ContentType.DOCUMENT)
+async def save_document(message: Message):
     user_id = message.from_user.id
-    user_folder = os.path.join(BASE_PATH, str(user_id))
+    user_dir = os.path.join(BASE_PATH, str(user_id))
+    os.makedirs(user_dir, exist_ok=True)
 
-    # Создание папки для пользователя, если её нет
-    if not os.path.exists(user_folder):
-        os.makedirs(user_folder)
+    document = message.document
+    file_path = os.path.join(user_dir, f"{uuid4()}_{document.file_name}")
 
-    # Собираем все файлы в одном сообщении
-    file_paths = []
+    file_info = await bot.get_file(document.file_id)
+    file_data = await bot.download_file(file_info.file_path)
 
-    # Проверяем, если есть документы
-    if message.document:
-        file = message.document
-        file_id = file.file_id
-        file_name = file.file_name
+    async with aiofiles.open(file_path, mode="wb") as f:
+        await f.write(file_data.read())
 
-        file = await bot.get_file(file_id)
-        file_path = file.file_path
-        local_file_path = os.path.join(user_folder, file_name)
-        await bot.download_file(file_path, local_file_path)
+    await message.reply(f"Файл успешно добавлен!")
 
-        file_paths.append(local_file_path)
-
-    # Проверяем, если есть фотографии
-    if message.photo:
-        for file in message.photo:
-            file_id = file.file_id
-            file_name = f"{user_id}_photo.jpg"  # Генерируем имя для каждого фото
-
-            file = await bot.get_file(file_id)
-            file_path = file.file_path
-            local_file_path = os.path.join(user_folder, file_name)
-            await bot.download_file(file_path, local_file_path)
-
-            file_paths.append(local_file_path)
-
-    # Проверяем, если есть видео
-    if message.video:
-        file = message.video
-        file_id = file.file_id
-        file_name = f"{user_id}_video.mp4"
-
-        file = await bot.get_file(file_id)
-        file_path = file.file_path
-        local_file_path = os.path.join(user_folder, file_name)
-        await bot.download_file(file_path, local_file_path)
-
-        file_paths.append(local_file_path)
-
-    # После того как все файлы скачаны, объединяем их в один итоговый файл
-    # Путь для сохранения объединенного файла
+@router.message(F.content_type == ContentType.PHOTO)
+async def save_photo(message: Message):
+    user_id = message.from_user.id
+    user_dir = os.path.join(BASE_PATH, str(user_id))
     result_folder = os.path.join(RESULTS_PATH, str(user_id))
+    os.makedirs(user_dir, exist_ok=True)
+    os.makedirs(result_folder, exist_ok=True)
 
-    # Создаем папку для результатов, если её нет
-    if not os.path.exists(result_folder):
-        os.makedirs(result_folder)
+    photo = message.photo[-1]
+    file_path = os.path.join(user_dir, f"{uuid4()}_{photo.file_id}.jpg")
 
-    # Итоговый путь для PDF файла
-    final_pdf_path = os.path.join(result_folder, "processed_result_final.pdf")
+    file_info = await bot.get_file(photo.file_id)
+    file_data = await bot.download_file(file_info.file_path)
 
-    # Выполняем объединение файлов в итоговый PDF
-    processed_pdf = await convert_to_pdf(user_folder, final_pdf_path)
+    async with aiofiles.open(file_path, mode="wb") as f:
+        await f.write(file_data.read())
 
-    # Отправляем итоговый PDF файл пользователю
-    await message.answer("Вот результат вашей обработки:")
-
-    from aiogram.types.input_file import FSInputFile
-
-    doc = FSInputFile(final_pdf_path, filename=f'result.pdf')
-    await message.reply_document(doc)
-
-    # Очистим папку пользователя после отправки
-    shutil.rmtree(user_folder)
-
+    await message.reply(f"Фото успешно добавлено!")
 
 async def convert_to_pdf(in_dir: str, out_file: str):
-    """
-    Конвертирует изображения и PDF файлы в указанной папке в один PDF файл.
-    :param in_dir: Папка с изображениями и PDF файлами
-    :param out_file: Путь для сохранения итогового PDF
-    :return: Путь к сохраненному PDF файлу
-    """
-    images: List[Image.Image] = []
-    pdf_merger = PdfMerger()  # Объединитель PDF файлов
+    """Конвертация изображений в PDF."""
+    KNOWN_EXTS = ('.jpg', '.jpeg', '.png')
+    images = []
+    entries = os.listdir(in_dir)
 
-    # Получаем список всех файлов в папке
-    files = os.listdir(in_dir)
+    for entry in entries:
+        _, ext = os.path.splitext(entry)
+        if ext.lower() not in KNOWN_EXTS:
+            continue
+        path_name = os.path.join(in_dir, entry)
+        img = Image.open(path_name)
+        if img.mode == 'RGBA':
+            img = img.convert('RGB')
+        images.append(img)
 
-    for file_name in files:
-        full_path = os.path.join(in_dir, file_name)
-
-        # Если это изображение
-        if file_name.lower().endswith(('jpg', 'jpeg', 'png', 'bmp', 'gif')):
-            try:
-                img = Image.open(full_path)
-                if img.mode == 'RGBA':
-                    img = img.convert('RGB')  # Конвертируем в RGB, чтобы убрать альфа-канал
-                images.append(img)
-            except:
-                print(f"Не удалось обработать файл {full_path}, так как это не изображение.")
-
-        # Если это PDF файл
-        elif file_name.lower().endswith('.pdf'):
-            try:
-                pdf_merger.append(full_path)
-            except Exception as e:
-                print(f"Не удалось обработать PDF файл {full_path}: {e}")
-
-    # Если есть изображения, конвертируем их в PDF
     if images:
         first_frame = images[0]
         first_frame.save(
             out_file,
             save_all=True,
-            append_images=images[1:],  # Добавляем остальные изображения
-            format='PDF',
+            append_images=images[1:],
+            format='PDF'
         )
-
-    # Если были PDF файлы, объединяем их с изображениями
-    if os.path.exists(out_file) and pdf_merger.pages:
-        pdf_merger.append(out_file)  # Добавляем сгенерированный PDF
-        final_pdf_path = out_file.replace('.pdf', '_final.pdf')
-        pdf_merger.write(final_pdf_path)
-        return final_pdf_path
-    elif images:
+        [image.close() for image in images]
         return out_file
     else:
-        return out_file  # Возвращаем путь, даже если ничего не было обработано
+        return None
 
+@router.message(F.text == "Объединить файлы")
+async def handle_message(message: Message):
+    user_id = message.from_user.id
+    user_folder = os.path.join(BASE_PATH, str(user_id))
+    result_folder = os.path.join(RESULTS_PATH, str(user_id))
+    os.makedirs(result_folder, exist_ok=True)
+
+    result_pdf = os.path.join(result_folder, "result.pdf")
+    final_pdf = await convert_to_pdf(user_folder, result_pdf)
+
+    if final_pdf and os.path.exists(final_pdf):
+        await message.answer_document(FSInputFile(final_pdf))
+        shutil.rmtree(user_folder)
+        shutil.rmtree(result_folder)
+    else:
+        await message.reply("Не удалось создать PDF. Проверьте, загружены ли изображения.")
+
+@router.message()
+async def unsupported_content(message: Message):
+    await message.reply("Я могу сохранять только документы и фотографии.")
 
 async def main():
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
