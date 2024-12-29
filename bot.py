@@ -56,14 +56,21 @@ async def send_help(message: Message):
         "Я могу принимать и обрабатывать файлы. Просто отправьте файл или фото, и я обработаю их для вас."
     )
 
+# Для хранения порядка загружаемых файлов
+user_file_counters = {}
+
 @router.message(F.content_type == ContentType.DOCUMENT)
 async def save_document(message: Message):
     user_id = message.from_user.id
     user_dir = os.path.join(BASE_PATH, str(user_id))
     os.makedirs(user_dir, exist_ok=True)
 
+    # Получаем и увеличиваем счетчик для пользователя
+    counter = user_file_counters.get(user_id, 0) + 1
+    user_file_counters[user_id] = counter
+
     document = message.document
-    file_path = os.path.join(user_dir, f"{uuid4()}_{document.file_name}")
+    file_path = os.path.join(user_dir, f"{counter:03d}_{uuid4()}_{document.file_name}")
 
     file_info = await bot.get_file(document.file_id)
     file_data = await bot.download_file(file_info.file_path)
@@ -77,12 +84,14 @@ async def save_document(message: Message):
 async def save_photo(message: Message):
     user_id = message.from_user.id
     user_dir = os.path.join(BASE_PATH, str(user_id))
-    result_folder = os.path.join(RESULTS_PATH, str(user_id))
     os.makedirs(user_dir, exist_ok=True)
-    os.makedirs(result_folder, exist_ok=True)
+
+    # Получаем и увеличиваем счетчик для пользователя
+    counter = user_file_counters.get(user_id, 0) + 1
+    user_file_counters[user_id] = counter
 
     photo = message.photo[-1]
-    file_path = os.path.join(user_dir, f"{uuid4()}_{photo.file_id}.jpg")
+    file_path = os.path.join(user_dir, f"{counter:03d}_{uuid4()}_{photo.file_id}.jpg")
 
     file_info = await bot.get_file(photo.file_id)
     file_data = await bot.download_file(file_info.file_path)
@@ -92,34 +101,48 @@ async def save_photo(message: Message):
 
     await message.reply(f"Фото успешно добавлено!")
 
+
 async def convert_to_pdf(in_dir: str, out_file: str):
-    """Конвертация изображений в PDF."""
-    KNOWN_EXTS = ('.jpg', '.jpeg', '.png')
+    """Конвертация изображений и объединение PDF-файлов в один PDF."""
+    KNOWN_IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
+    pdf_merger = PdfMerger()  # Для объединения PDF
     images = []
+
     entries = os.listdir(in_dir)
 
     for entry in entries:
         _, ext = os.path.splitext(entry)
-        if ext.lower() not in KNOWN_EXTS:
-            continue
         path_name = os.path.join(in_dir, entry)
-        img = Image.open(path_name)
-        if img.mode == 'RGBA':
-            img = img.convert('RGB')
-        images.append(img)
 
-    if images:
-        first_frame = images[0]
-        first_frame.save(
-            out_file,
-            save_all=True,
-            append_images=images[1:],
-            format='PDF'
-        )
-        [image.close() for image in images]
-        return out_file
-    else:
-        return None
+        if ext.lower() in KNOWN_IMAGE_EXTS:
+            # Обрабатываем изображения
+            img = Image.open(path_name)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            temp_pdf_path = os.path.splitext(path_name)[0] + ".pdf"
+            img.save(temp_pdf_path, format='PDF')
+            images.append(temp_pdf_path)  # Сохраняем временный PDF
+            img.close()
+
+        elif ext.lower() == '.pdf':
+            # Добавляем PDF-файл в итоговый документ
+            pdf_merger.append(path_name)
+
+    # Добавляем временные PDF из изображений
+    for img_pdf in images:
+        pdf_merger.append(img_pdf)
+
+    # Сохраняем итоговый PDF
+    with open(out_file, 'wb') as f:
+        pdf_merger.write(f)
+    pdf_merger.close()
+
+    # Удаляем временные PDF из изображений
+    for img_pdf in images:
+        os.remove(img_pdf)
+
+    return out_file if os.path.exists(out_file) else None
+
 
 @router.message(F.text == "Объединить файлы")
 async def handle_message(message: Message):
