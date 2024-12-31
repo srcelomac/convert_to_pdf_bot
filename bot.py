@@ -89,7 +89,6 @@ async def save_document(message: Message):
     user_id = message.from_user.id
     user_dir = os.path.join(BASE_PATH, str(user_id))
     os.makedirs(user_dir, exist_ok=True)
-    print("Документ")
     if not await check_user_limits(user_dir):
         await message.reply("Превышены ограничения: не более 50 файлов и 100 МБ на пользователя.")
         return
